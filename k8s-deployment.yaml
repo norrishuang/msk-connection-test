@@ -27,7 +27,7 @@ spec:
             - name: MSK_TOPIC
               value: "msk-test"
             - name: TEST_MODE
-              value: "no-keepalive"
+              value: "prod-like"
             - name: PAUSE_DURATION
               value: "6m"
           resources:

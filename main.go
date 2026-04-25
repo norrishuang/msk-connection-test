@@ -68,6 +68,22 @@ func main() {
 
 func buildConfig(brokers, testMode string) *kafka.ConfigMap {
 	switch testMode {
+	case "prod-like":
+		log.Println("TEST_MODE: prod-like (simulating ca-balance production config)")
+		return &kafka.ConfigMap{
+			"bootstrap.servers":                     brokers,
+			"client.id":                             "confluent-producer",
+			"acks":                                  "all",
+			"retries":                               3,
+			"linger.ms":                             1,
+			"compression.type":                      "snappy",
+			"max.in.flight.requests.per.connection": 5,
+			"request.timeout.ms":                    30000,
+			"delivery.timeout.ms":                   120000,
+			"retry.backoff.ms":                      200,
+			"batch.size":                            65536,
+			"queue.buffering.max.kbytes":            65536,
+		}
 	case "with-keepalive":
 		log.Println("Keepalive ENABLED: socket.keepalive.enable=true, connections.max.idle.ms=280000")
 		return &kafka.ConfigMap{
