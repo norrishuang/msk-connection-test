@@ -47,8 +47,8 @@ func main() {
 		BatchSize:    1, // 每条消息立即发送，方便观察
 			// IdleTimeout & MetadataTTL 设置为 8 分钟，确保 10 分钟 pause 期间连接不被回收
 		Transport: &kafka.Transport{
-			IdleTimeout: 8 * time.Minute,
-			MetadataTTL: 8 * time.Minute,
+			IdleTimeout: 15 * time.Minute,
+			MetadataTTL: 15 * time.Minute,
 		},
 	}
 	defer func() {
