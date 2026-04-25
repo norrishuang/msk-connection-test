@@ -85,13 +85,23 @@ func buildConfig(brokers, testMode string) *kafka.ConfigMap {
 			"queue.buffering.max.kbytes":            65536,
 		}
 	case "with-keepalive":
-		log.Println("Keepalive ENABLED: socket.keepalive.enable=true, connections.max.idle.ms=280000")
+		log.Println("TEST_MODE: with-keepalive (ca-balance config + socket.keepalive.enable=true + connections.max.idle.ms=280000)")
 		return &kafka.ConfigMap{
-			"bootstrap.servers":       brokers,
-			"client.id":               "msk-test-with-keepalive",
-			"acks":                    "all",
-			"socket.keepalive.enable": true,
-			"connections.max.idle.ms": 280000,
+			"bootstrap.servers":                     brokers,
+			"client.id":                             "confluent-producer",
+			"acks":                                  "all",
+			"retries":                               3,
+			"linger.ms":                             1,
+			"compression.type":                      "snappy",
+			"max.in.flight.requests.per.connection": 5,
+			"request.timeout.ms":                   30000,
+			"delivery.timeout.ms":                  120000,
+			"retry.backoff.ms":                      200,
+			"batch.size":                            65536,
+			"queue.buffering.max.kbytes":            65536,
+			// 修复项：在 prod-like 基础上加上这两个参数
+			"socket.keepalive.enable":               true,
+			"connections.max.idle.ms":               280000,
 		}
 	default: // "no-keepalive"
 		log.Println("Keepalive DISABLED (reproducing 350s timeout)")
