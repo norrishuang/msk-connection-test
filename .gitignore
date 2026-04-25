@@ -1,0 +1,10 @@
+# Binaries
+msk-connection-test
+msk-connection-test.exe
+
+# Env files
+.env
+*.env
+
+# Go tool cache
+vendor/
