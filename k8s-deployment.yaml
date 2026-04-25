@@ -23,7 +23,7 @@ spec:
           image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/msk-connection-test:latest
           env:
             - name: MSK_BROKERS
-              value: "YOUR_MSK_BROKER_1:9092,YOUR_MSK_BROKER_2:9092"  # <-- 替换成你的 broker 地址
+              value: "boot-vsx.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092,boot-gua.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092,boot-19y.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092"
             - name: MSK_TOPIC
               value: "msk-test"
           resources:
