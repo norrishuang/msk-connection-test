@@ -45,12 +45,11 @@ func main() {
 		Balancer:     &kafka.LeastBytes{},
 		BatchTimeout: 10 * time.Millisecond,
 		BatchSize:    1, // 每条消息立即发送，方便观察
-		// 连接保活：writer 本身维护连接池，不发消息时连接保持
-		// TLS/SASL: 无认证版本，如需认证取消注释下方配置
-		// Transport: &kafka.Transport{
-		//     TLS: &tls.Config{},
-		//     SASL: scram.Mechanism(scram.SHA512, "user", "pass"),
-		// },
+			// IdleTimeout & MetadataTTL 设置为 8 分钟，确保 10 分钟 pause 期间连接不被回收
+		Transport: &kafka.Transport{
+			IdleTimeout: 8 * time.Minute,
+			MetadataTTL: 8 * time.Minute,
+		},
 	}
 	defer func() {
 		log.Println("Closing writer…")
