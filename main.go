@@ -6,10 +6,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/IBM/sarama"
+	"github.com/segmentio/kafka-go"
 )
 
 const (
@@ -19,46 +20,13 @@ const (
 )
 
 func main() {
-	// MSK broker addresses — set via env or command-line arg
 	brokers := getBrokers()
 	topic := getTopic()
 
-	log.Printf("MSK Connection Test")
+	log.Printf("MSK Connection Test (kafka-go / segmentio)")
 	log.Printf("Brokers  : %v", brokers)
 	log.Printf("Topic    : %s", topic)
 	log.Printf("Pattern  : write %v → pause %v → repeat", writeDuration, pauseDuration)
-
-	// Sarama config for MSK (Kafka 3.9.x)
-	cfg := sarama.NewConfig()
-	cfg.Version = sarama.V3_6_0_0 // highest version supported by sarama; compatible with MSK 3.9.x
-	cfg.Producer.Return.Successes = true
-	cfg.Producer.Return.Errors = true
-	cfg.Producer.RequiredAcks = sarama.WaitForAll
-	cfg.Producer.Compression = sarama.CompressionSnappy
-	cfg.Net.DialTimeout = 10 * time.Second
-	cfg.Net.ReadTimeout = 30 * time.Second
-	cfg.Net.WriteTimeout = 10 * time.Second
-	cfg.Metadata.RefreshFrequency = 5 * time.Minute
-
-	// TLS/SASL — uncomment and configure if your MSK cluster uses authentication
-	// cfg.Net.TLS.Enable = true
-	// cfg.Net.TLS.Config = &tls.Config{InsecureSkipVerify: false}
-	// cfg.Net.SASL.Enable = true
-	// cfg.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
-	// cfg.Net.SASL.User = os.Getenv("MSK_SASL_USER")
-	// cfg.Net.SASL.Password = os.Getenv("MSK_SASL_PASS")
-
-	log.Println("Connecting to MSK cluster…")
-	producer, err := sarama.NewSyncProducer(brokers, cfg)
-	if err != nil {
-		log.Fatalf("Failed to create producer: %v", err)
-	}
-	defer func() {
-		if err := producer.Close(); err != nil {
-			log.Printf("Error closing producer: %v", err)
-		}
-	}()
-	log.Println("Connected ✓")
 
 	// Graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -70,11 +38,35 @@ func main() {
 		cancel()
 	}()
 
+	// kafka-go writer — 创建一次，整个生命周期复用（保持长连接）
+	w := &kafka.Writer{
+		Addr:         kafka.TCP(brokers...),
+		Topic:        topic,
+		Balancer:     &kafka.LeastBytes{},
+		BatchTimeout: 10 * time.Millisecond,
+		BatchSize:    1, // 每条消息立即发送，方便观察
+		// 连接保活：writer 本身维护连接池，不发消息时连接保持
+		// TLS/SASL: 无认证版本，如需认证取消注释下方配置
+		// Transport: &kafka.Transport{
+		//     TLS: &tls.Config{},
+		//     SASL: scram.Mechanism(scram.SHA512, "user", "pass"),
+		// },
+	}
+	defer func() {
+		log.Println("Closing writer…")
+		if err := w.Close(); err != nil {
+			log.Printf("Error closing writer: %v", err)
+		}
+	}()
+
+	log.Println("Writer initialized, starting loop…")
+
 	cycle := 0
 	for {
 		cycle++
 		log.Printf("=== Cycle #%d: START writing for %v ===", cycle, writeDuration)
-		if err := writePhase(ctx, producer, topic, cycle); err != nil {
+
+		if err := writePhase(ctx, w, cycle); err != nil {
 			if ctx.Err() != nil {
 				log.Println("Context cancelled, exiting.")
 				return
@@ -88,15 +80,16 @@ func main() {
 			log.Println("Context cancelled during pause, exiting.")
 			return
 		case <-time.After(pauseDuration):
-			// continue to next cycle
+			// next cycle
 		}
 	}
 }
 
-// writePhase sends msgsPerSecond messages every second for writeDuration.
-func writePhase(ctx context.Context, producer sarama.SyncProducer, topic string, cycle int) error {
+// writePhase sends msgsPerSecond messages per second for writeDuration.
+func writePhase(ctx context.Context, w *kafka.Writer, cycle int) error {
 	deadline := time.Now().Add(writeDuration)
-	ticker := time.NewTicker(time.Second / msgsPerSecond)
+	interval := time.Second / time.Duration(msgsPerSecond)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	seq := 0
@@ -110,25 +103,24 @@ func writePhase(ctx context.Context, producer sarama.SyncProducer, topic string,
 				`{"cycle":%d,"seq":%d,"ts":"%s","note":"msk-connection-test"}`,
 				cycle, seq, t.UTC().Format(time.RFC3339Nano),
 			)
-			msg := &sarama.ProducerMessage{
-				Topic: topic,
-				Key:   sarama.StringEncoder(fmt.Sprintf("key-%d-%d", cycle, seq)),
-				Value: sarama.StringEncoder(value),
+			msg := kafka.Message{
+				Key:   []byte(fmt.Sprintf("key-%d-%d", cycle, seq)),
+				Value: []byte(value),
 			}
-			partition, offset, err := producer.SendMessage(msg)
+			writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)
+			err := w.WriteMessages(writeCtx, msg)
+			writeCancel()
 			if err != nil {
 				log.Printf("[WARN] cycle=%d seq=%d send error: %v", cycle, seq, err)
 				continue
 			}
-			log.Printf("[SEND] cycle=%d seq=%d partition=%d offset=%d", cycle, seq, partition, offset)
+			log.Printf("[SEND] cycle=%d seq=%d ts=%s", cycle, seq, t.UTC().Format("15:04:05.000"))
 		}
 	}
 	log.Printf("=== Cycle #%d: DONE writing %d messages ===", cycle, seq)
 	return nil
 }
 
-// getBrokers reads broker addresses from env MSK_BROKERS (comma-separated)
-// or falls back to the first command-line argument.
 func getBrokers() []string {
 	if v := os.Getenv("MSK_BROKERS"); v != "" {
 		return splitCSV(v)
@@ -136,11 +128,9 @@ func getBrokers() []string {
 	if len(os.Args) > 1 {
 		return splitCSV(os.Args[1])
 	}
-	// default placeholder — replace before running
 	return []string{"localhost:9092"}
 }
 
-// getTopic reads the topic from env MSK_TOPIC or defaults to "msk-test".
 func getTopic() string {
 	if v := os.Getenv("MSK_TOPIC"); v != "" {
 		return v
@@ -149,29 +139,12 @@ func getTopic() string {
 }
 
 func splitCSV(s string) []string {
-	var out []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			if t := trim(s[start:i]); t != "" {
-				out = append(out, t)
-			}
-			start = i + 1
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
 		}
 	}
-	if t := trim(s[start:]); t != "" {
-		out = append(out, t)
-	}
 	return out
-}
-
-func trim(s string) string {
-	i, j := 0, len(s)
-	for i < j && (s[i] == ' ' || s[i] == '\t') {
-		i++
-	}
-	for j > i && (s[j-1] == ' ' || s[j-1] == '\t') {
-		j--
-	}
-	return s[i:j]
 }
