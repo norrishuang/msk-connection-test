@@ -38,6 +38,10 @@ func main() {
 		cancel()
 	}()
 
+	// 底层连接事件 logger
+	infolog := log.New(os.Stdout, "[kafka-info] ", log.LstdFlags)
+	errlog := log.New(os.Stdout, "[kafka-error] ", log.LstdFlags)
+
 	// kafka-go writer — 创建一次，整个生命周期复用（保持长连接）
 	w := &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
@@ -45,7 +49,8 @@ func main() {
 		Balancer:     &kafka.LeastBytes{},
 		BatchTimeout: 10 * time.Millisecond,
 		BatchSize:    1, // 每条消息立即发送，方便观察
-			// IdleTimeout & MetadataTTL 设置为 8 分钟，确保 10 分钟 pause 期间连接不被回收
+		Logger:       infolog,
+		ErrorLogger:  errlog,
 		Transport: &kafka.Transport{
 			IdleTimeout: 15 * time.Minute,
 			MetadataTTL: 15 * time.Minute,
