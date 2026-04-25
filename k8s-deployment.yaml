@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: msk-connection-test
+  namespace: default
+  labels:
+    app: msk-connection-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: msk-connection-test
+  template:
+    metadata:
+      labels:
+        app: msk-connection-test
+    spec:
+      # 调度到 msk-test nodegroup (c8i.xlarge)
+      nodeSelector:
+        role: msk-test
+      containers:
+        - name: msk-connection-test
+          image: 812046859005.dkr.ecr.us-east-1.amazonaws.com/msk-connection-test:latest
+          env:
+            - name: MSK_BROKERS
+              value: "YOUR_MSK_BROKER_1:9092,YOUR_MSK_BROKER_2:9092"  # <-- 替换成你的 broker 地址
+            - name: MSK_TOPIC
+              value: "msk-test"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          imagePullPolicy: Always
+      restartPolicy: Always
