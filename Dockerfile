@@ -1,11 +1,13 @@
 FROM golang:1.21-alpine AS builder
 
+RUN apk add --no-cache build-base librdkafka-dev pkgconfig
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY *.go ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o msk-connection-test .
+RUN CGO_ENABLED=1 go build -tags musl -ldflags="-w -s" -o msk-connection-test .
 
 # ---- runtime image ----
 FROM alpine:3.19

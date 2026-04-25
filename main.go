@@ -1,17 +1,15 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/segmentio/kafka-go"
+	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 )
 
 const (
@@ -25,64 +23,41 @@ func main() {
 	testMode := getTestMode()
 	pauseDur := getPauseDuration()
 
-	log.Printf("MSK Connection Test (segmentio/kafka-go)")
+	log.Printf("MSK Connection Test (confluent-kafka-go / librdkafka)")
 	log.Printf("TEST_MODE      : %s", testMode)
-	log.Printf("Brokers        : %s", strings.Join(brokers, ", "))
+	log.Printf("Brokers        : %s", brokers)
 	log.Printf("Topic          : %s", topic)
 	log.Printf("PAUSE_DURATION : %v", pauseDur)
 	log.Printf("Pattern        : write %v → pause %v → repeat", writeDuration, pauseDur)
 
-	// Build transport based on TEST_MODE
-	var transport *kafka.Transport
-	switch testMode {
-	case "with-keepalive":
-		dialer := &net.Dialer{
-			KeepAlive: 60 * time.Second,
-		}
-		transport = &kafka.Transport{
-			Dial:        dialer.DialContext,
-			IdleTimeout: 280 * time.Second,
-			MetadataTTL: 15 * time.Minute,
-		}
-		log.Println("Keepalive ENABLED: TCP KeepAlive=60s, IdleTimeout=280s")
-	default: // "no-keepalive"
-		transport = &kafka.Transport{
-			IdleTimeout: 15 * time.Minute,
-			MetadataTTL: 15 * time.Minute,
-		}
-		log.Println("Keepalive DISABLED: IdleTimeout=15m (reproducing 350s timeout)")
+	cfg := buildConfig(brokers, testMode)
+	producer, err := kafka.NewProducer(cfg)
+	if err != nil {
+		log.Fatalf("Failed to create producer: %v", err)
 	}
-
-	writer := &kafka.Writer{
-		Addr:      kafka.TCP(brokers...),
-		Topic:     topic,
-		Balancer:  &kafka.RoundRobin{},
-		Transport: transport,
-	}
-	defer writer.Close()
+	defer producer.Close()
 
 	// Graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	done := make(chan struct{})
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigs
 		log.Printf("Received signal %s, shutting down…", sig)
-		cancel()
+		close(done)
 	}()
 
 	log.Println("Producer initialized, starting loop…")
 
 	for cycle := 1; ; cycle++ {
 		log.Printf("=== Cycle #%d: START writing for %v ===", cycle, writeDuration)
-		if writePhase(ctx, writer, topic, cycle) {
+		if writePhase(producer, topic, cycle, done) {
 			return
 		}
 
 		log.Printf("=== Cycle #%d: PAUSE for %v (connection idle) ===", cycle, pauseDur)
 		select {
-		case <-ctx.Done():
+		case <-done:
 			log.Println("Shutting down during pause.")
 			return
 		case <-time.After(pauseDur):
@@ -91,7 +66,28 @@ func main() {
 	}
 }
 
-func writePhase(ctx context.Context, w *kafka.Writer, topic string, cycle int) bool {
+func buildConfig(brokers, testMode string) *kafka.ConfigMap {
+	switch testMode {
+	case "with-keepalive":
+		log.Println("Keepalive ENABLED: socket.keepalive.enable=true, connections.max.idle.ms=280000")
+		return &kafka.ConfigMap{
+			"bootstrap.servers":       brokers,
+			"client.id":               "msk-test-with-keepalive",
+			"acks":                    "all",
+			"socket.keepalive.enable": true,
+			"connections.max.idle.ms": 280000,
+		}
+	default: // "no-keepalive"
+		log.Println("Keepalive DISABLED (reproducing 350s timeout)")
+		return &kafka.ConfigMap{
+			"bootstrap.servers": brokers,
+			"client.id":         "msk-test-no-keepalive",
+			"acks":              "all",
+		}
+	}
+}
+
+func writePhase(p *kafka.Producer, topic string, cycle int, done chan struct{}) bool {
 	deadline := time.Now().Add(writeDuration)
 	interval := time.Second / time.Duration(msgsPerSecond)
 	ticker := time.NewTicker(interval)
@@ -100,7 +96,7 @@ func writePhase(ctx context.Context, w *kafka.Writer, topic string, cycle int) b
 	seq := 0
 	for time.Now().Before(deadline) {
 		select {
-		case <-ctx.Done():
+		case <-done:
 			log.Println("Shutting down during write phase.")
 			return true
 		case t := <-ticker.C:
@@ -109,14 +105,23 @@ func writePhase(ctx context.Context, w *kafka.Writer, topic string, cycle int) b
 				`{"cycle":%d,"seq":%d,"ts":"%s","note":"msk-connection-test"}`,
 				cycle, seq, t.UTC().Format(time.RFC3339Nano),
 			)
-			err := w.WriteMessages(ctx, kafka.Message{
-				Key:   []byte(fmt.Sprintf("key-%d-%d", cycle, seq)),
-				Value: []byte(value),
-			})
+			err := p.Produce(&kafka.Message{
+				TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+				Key:            []byte(fmt.Sprintf("key-%d-%d", cycle, seq)),
+				Value:          []byte(value),
+			}, nil)
 			if err != nil {
 				classifyAndLogError(err, cycle, seq)
-			} else {
-				log.Printf("[SEND-OK] cycle=%d seq=%d", cycle, seq)
+				continue
+			}
+			// Wait for delivery report
+			e := <-p.Events()
+			if m, ok := e.(*kafka.Message); ok {
+				if m.TopicPartition.Error != nil {
+					classifyAndLogError(m.TopicPartition.Error, cycle, seq)
+				} else {
+					log.Printf("[SEND-OK] cycle=%d seq=%d", cycle, seq)
+				}
 			}
 		}
 	}
@@ -127,12 +132,12 @@ func writePhase(ctx context.Context, w *kafka.Writer, topic string, cycle int) b
 func classifyAndLogError(err error, cycle, seq int) {
 	errStr := err.Error()
 	tag := "[SEND-ERROR]"
-	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") {
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "deadline") ||
+		strings.Contains(errStr, "Timed out") {
 		tag = "[TIMEOUT-ERROR]"
-	} else if strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "broken pipe") ||
-		strings.Contains(errStr, "EOF") ||
-		strings.Contains(errStr, "refused") {
+	} else if strings.Contains(errStr, "disconnect") || strings.Contains(errStr, "Disconnected") ||
+		strings.Contains(errStr, "connection reset") || strings.Contains(errStr, "broken pipe") ||
+		strings.Contains(errStr, "Transport failure") || strings.Contains(errStr, "refused") {
 		tag = "[DISCONNECT-ERROR]"
 	}
 	log.Printf("%s cycle=%d seq=%d error=%v", tag, cycle, seq, err)
@@ -156,7 +161,7 @@ func getPauseDuration() time.Duration {
 	return 10 * time.Minute
 }
 
-func getBrokers() []string {
+func getBrokers() string {
 	s := os.Getenv("MSK_BROKERS")
 	if s == "" && len(os.Args) > 1 {
 		s = os.Args[1]
@@ -164,14 +169,7 @@ func getBrokers() []string {
 	if s == "" {
 		s = "localhost:9092"
 	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
+	return s
 }
 
 func getTopic() string {
