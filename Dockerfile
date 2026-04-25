@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -15,8 +15,9 @@ RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=builder /app/msk-connection-test .
 
-# Default env (override at runtime)
 ENV MSK_BROKERS="localhost:9092"
 ENV MSK_TOPIC="msk-test"
+ENV TEST_MODE="no-keepalive"
+ENV PAUSE_DURATION="6m"
 
 ENTRYPOINT ["/app/msk-connection-test"]

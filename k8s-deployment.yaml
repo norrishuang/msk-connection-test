@@ -26,6 +26,10 @@ spec:
               value: "boot-vsx.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092,boot-gua.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092,boot-19y.kafkagotest.loqoqz.c10.kafka.us-east-1.amazonaws.com:9092"
             - name: MSK_TOPIC
               value: "msk-test"
+            - name: TEST_MODE
+              value: "no-keepalive"
+            - name: PAUSE_DURATION
+              value: "6m"
           resources:
             requests:
               cpu: "500m"
